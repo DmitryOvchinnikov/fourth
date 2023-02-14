@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dmitryovchinnikov/third/business/data/dbtest"
-	"github.com/dmitryovchinnikov/third/foundation/docker"
+	"github.com/dmitryovchinnikov/fourth/business/data/dbtest"
+	"github.com/dmitryovchinnikov/fourth/foundation/docker"
 )
 
 var c *docker.Container

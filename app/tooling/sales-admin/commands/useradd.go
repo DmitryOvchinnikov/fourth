@@ -3,11 +3,12 @@ package commands
 import (
 	"context"
 	"fmt"
+	"net/mail"
 	"time"
 
-	userCore "github.com/dmitryovchinnikov/third/business/core/user"
-	"github.com/dmitryovchinnikov/third/business/sys/auth"
-	"github.com/dmitryovchinnikov/third/business/sys/database"
+	"github.com/dmitryovchinnikov/fourth/business/core/user"
+	"github.com/dmitryovchinnikov/fourth/business/core/user/stores/userdb"
+	"github.com/dmitryovchinnikov/fourth/business/sys/database"
 	"go.uber.org/zap"
 )
 
@@ -27,17 +28,22 @@ func UserAdd(log *zap.SugaredLogger, cfg database.Config, name, email, password 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	core := userCore.NewCore(log, db)
+	core := user.NewCore(userdb.NewStore(log, db))
 
-	nu := userCore.NewUser{
-		Name:            name,
-		Email:           email,
-		Password:        password,
-		PasswordConfirm: password,
-		Roles:           []string{auth.RoleAdmin, auth.RoleUser},
+	addr, err := mail.ParseAddress(email)
+	if err != nil {
+		return fmt.Errorf("parsing email: %w", err)
 	}
 
-	usr, err := core.Create(ctx, nu, time.Now())
+	nu := user.NewUser{
+		Name:            name,
+		Email:           *addr,
+		Password:        password,
+		PasswordConfirm: password,
+		Roles:           []user.Role{user.RoleAdmin, user.RoleUser},
+	}
+
+	usr, err := core.Create(ctx, nu)
 	if err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}

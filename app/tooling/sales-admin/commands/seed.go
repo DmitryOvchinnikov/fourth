@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dmitryovchinnikov/third/business/data/dbschema"
-	"github.com/dmitryovchinnikov/third/business/sys/database"
+	"github.com/dmitryovchinnikov/fourth/business/data/dbschema"
+	"github.com/dmitryovchinnikov/fourth/business/sys/database"
 )
 
 // Seed loads test data into the database.

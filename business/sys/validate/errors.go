@@ -23,7 +23,7 @@ func (fe FieldErrors) Error() string {
 	return string(d)
 }
 
-// Fields returns the fields that failed validation.
+// Fields returns the fields that failed validation
 func (fe FieldErrors) Fields() map[string]string {
 	m := make(map[string]string)
 	for _, fld := range fe {

@@ -9,13 +9,13 @@ import (
 	"os"
 )
 
-// GenKey creates a x509 private/public key for auth tokens.
+// GenKey creates an x509 private/public key for auth tokens.
 func GenKey() error {
 
 	// Generate a new private key.
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return ErrHelp
+		return fmt.Errorf("generating key: %w", err)
 	}
 
 	// Create a file for the private key information in PEM form.
@@ -27,19 +27,13 @@ func GenKey() error {
 
 	// Construct a PEM block for the private key.
 	privateBlock := pem.Block{
-		Type:  "RSA PRIVATE KEY",
+		Type:  "PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 	}
 
 	// Write the private key to the private key file.
 	if err := pem.Encode(privateFile, &privateBlock); err != nil {
 		return fmt.Errorf("encoding to private file: %w", err)
-	}
-
-	// Marshal the public key from the private key to PKIX.
-	asn1Bytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		return fmt.Errorf("marshaling public key: %w", err)
 	}
 
 	// Create a file for the public key information in PEM form.
@@ -49,13 +43,19 @@ func GenKey() error {
 	}
 	defer publicFile.Close()
 
+	// Marshal the public key from the private key to PKIX.
+	asn1Bytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return fmt.Errorf("marshaling public key: %w", err)
+	}
+
 	// Construct a PEM block for the public key.
 	publicBlock := pem.Block{
-		Type:  "RSA PUBLIC KEY",
+		Type:  "PUBLIC KEY",
 		Bytes: asn1Bytes,
 	}
 
-	// Write the public key to the private key file.
+	// Write the public key to the public key file.
 	if err := pem.Encode(publicFile, &publicBlock); err != nil {
 		return fmt.Errorf("encoding to public file: %w", err)
 	}

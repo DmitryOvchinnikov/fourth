@@ -1,6 +1,8 @@
 package web
 
-import "errors"
+import (
+	"errors"
+)
 
 // shutdownError is a type used to help with the graceful termination of the service.
 type shutdownError struct {

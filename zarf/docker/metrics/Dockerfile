@@ -6,28 +6,28 @@ ARG BUILD_REF
 # Create the service directory and the copy the module files first and then
 # download the dependencies. If this doesn't change, we won't need to do this
 # again in future builds.
-# RUN mkdir /third
-# COPY go.* /third/
-# WORKDIR /third
+# RUN mkdir /fourth
+# COPY go.* /fourth/
+# WORKDIR /fourth
 # RUN go mod download
 
 # Copy the source code into the container.
-COPY . /third
+COPY . /fourth
 
 # Build the service binary. We are doing this last since this will be different
 # every time we run through this process.
-WORKDIR /third/app/services/metrics
+WORKDIR /fourth/app/services/metrics
 RUN go build -ldflags "-X main.build=${BUILD_REF}"
 
 
 # Run the Go Binary in Alpine.
-FROM alpine:3.15
+FROM alpine:3.17
 ARG BUILD_DATE
 ARG BUILD_REF
 RUN addgroup -g 1000 -S metrics && \
-    adduser -u 1000 -h /third -G metrics -S metrics
-COPY --from=build_metrics --chown=metrics:metrics /third/app/services/metrics/metrics /third/metrics
-WORKDIR /third
+    adduser -u 1000 -h /fourth -G metrics -S metrics
+COPY --from=build_metrics --chown=metrics:metrics /fourth/app/services/metrics/metrics /fourth/metrics
+WORKDIR /fourth
 USER metrics
 CMD ["./metrics"]
 

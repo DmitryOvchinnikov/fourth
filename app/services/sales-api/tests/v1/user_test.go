@@ -5,18 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/dmitryovchinnikov/third/app/services/sales-api/handlers"
-	"github.com/dmitryovchinnikov/third/business/core/user"
-	"github.com/dmitryovchinnikov/third/business/data/dbtest"
-	"github.com/dmitryovchinnikov/third/business/sys/auth"
-	"github.com/dmitryovchinnikov/third/business/sys/validate"
-	v1Web "github.com/dmitryovchinnikov/third/business/web/v1"
+	"github.com/dmitryovchinnikov/fourth/app/services/sales-api/handlers"
+	"github.com/dmitryovchinnikov/fourth/business/core/user"
+	"github.com/dmitryovchinnikov/fourth/business/data/dbtest"
+	"github.com/dmitryovchinnikov/fourth/business/sys/validate"
+	v1Web "github.com/dmitryovchinnikov/fourth/business/web/v1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/uuid"
 )
 
 // UserTests holds methods for each user subtest. This type allows passing
@@ -28,12 +29,17 @@ type UserTests struct {
 	adminToken string
 }
 
-// TestUsers is the entry point for testing user management functions.
-func TestUsers(t *testing.T) {
+// Test_Users is the entry point for testing user management functions.
+func Test_Users(t *testing.T) {
 	t.Parallel()
 
 	test := dbtest.NewIntegration(t, c, "inttestusers")
-	t.Cleanup(test.Teardown)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Error(r)
+		}
+		test.Teardown()
+	}()
 
 	shutdown := make(chan os.Signal, 1)
 	tests := UserTests{
@@ -51,9 +57,9 @@ func TestUsers(t *testing.T) {
 	t.Run("getToken200", tests.getToken200)
 	t.Run("postUser400", tests.postUser400)
 	t.Run("postUser401", tests.postUser401)
-	t.Run("postUser403", tests.postUser403)
+	t.Run("postAdmin401", tests.postAdmin401)
 	t.Run("getUser400", tests.getUser400)
-	t.Run("getUser403", tests.getUser403)
+	t.Run("getUser401", tests.getUser401)
 	t.Run("getUser404", tests.getUser404)
 	t.Run("deleteUserNotFound", tests.deleteUserNotFound)
 	t.Run("putUser404", tests.putUser404)
@@ -62,7 +68,7 @@ func TestUsers(t *testing.T) {
 
 // getToken401 ensures an unknown user can't generate a token.
 func (ut *UserTests) getToken404(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/users/token", nil)
+	r := httptest.NewRequest(http.MethodGet, "/v1/users/token/54bb2165-71e1-41a6-af3e-7da4a0e1e2c1", nil)
 	w := httptest.NewRecorder()
 
 	r.SetBasicAuth("unknown@example.com", "some-password")
@@ -82,7 +88,7 @@ func (ut *UserTests) getToken404(t *testing.T) {
 }
 
 func (ut *UserTests) getToken200(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/users/token", nil)
+	r := httptest.NewRequest(http.MethodGet, "/v1/users/token/54bb2165-71e1-41a6-af3e-7da4a0e1e2c1", nil)
 	w := httptest.NewRecorder()
 
 	r.SetBasicAuth("admin@example.com", "gophers")
@@ -114,7 +120,13 @@ func (ut *UserTests) getToken200(t *testing.T) {
 // postUser400 validates a user can't be created with the endpoint
 // unless a valid user document is submitted.
 func (ut *UserTests) postUser400(t *testing.T) {
-	body, err := json.Marshal(&user.NewUser{})
+	usr := user.NewUser{
+		Email: mail.Address{
+			Name:    "Bill",
+			Address: "bill@ardanlabs.com",
+		},
+	}
+	body, err := json.Marshal(usr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +155,6 @@ func (ut *UserTests) postUser400(t *testing.T) {
 
 			fields := validate.FieldErrors{
 				{Field: "name", Error: "name is a required field"},
-				{Field: "email", Error: "email is a required field"},
 				{Field: "roles", Error: "roles is a required field"},
 				{Field: "password", Error: "password is a required field"},
 			}
@@ -152,7 +163,7 @@ func (ut *UserTests) postUser400(t *testing.T) {
 				Fields: fields.Fields(),
 			}
 
-			// We can't rely on the order of the field errors, so they have to be
+			// We can't rely on the order of the field errors so they have to be
 			// sorted. Tell the cmp package how to sort them.
 			sorter := cmpopts.SortSlices(func(a, b validate.FieldError) bool {
 				return a.Field < b.Field
@@ -166,9 +177,9 @@ func (ut *UserTests) postUser400(t *testing.T) {
 	}
 }
 
-// postUser403 validates a user can't be created unless the calling user is
+// postAdmin401 validates a user can't be created unless the calling user is
 // an admin. Regular users can't do this.
-func (ut *UserTests) postUser403(t *testing.T) {
+func (ut *UserTests) postAdmin401(t *testing.T) {
 	body, err := json.Marshal(&user.NewUser{})
 	if err != nil {
 		t.Fatal(err)
@@ -185,10 +196,10 @@ func (ut *UserTests) postUser403(t *testing.T) {
 		testID := 0
 		t.Logf("\tTest %d:\tWhen using an incomplete user value.", testID)
 		{
-			if w.Code != http.StatusForbidden {
-				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 403 for the response : %v", dbtest.Failed, testID, w.Code)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 401 for the response : %v", dbtest.Failed, testID, w.Code)
 			}
-			t.Logf("\t%s\tTest %d:\tShould receive a status code of 403 for the response.", dbtest.Success, testID)
+			t.Logf("\t%s\tTest %d:\tShould receive a status code of 401 for the response.", dbtest.Success, testID)
 		}
 	}
 }
@@ -252,8 +263,8 @@ func (ut *UserTests) getUser400(t *testing.T) {
 	}
 }
 
-// getUser403 validates a regular user can't fetch anyone but themselves.
-func (ut *UserTests) getUser403(t *testing.T) {
+// getUser401 validates a regular user can't fetch anyone but themselves.
+func (ut *UserTests) getUser401(t *testing.T) {
 	t.Log("Given the need to validate regular users can't fetch other users.")
 	{
 		testID := 0
@@ -266,13 +277,13 @@ func (ut *UserTests) getUser403(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer "+ut.userToken)
 			ut.app.ServeHTTP(w, r)
 
-			if w.Code != http.StatusForbidden {
-				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 403 for the response : %v", dbtest.Failed, testID, w.Code)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 401 for the response : %v", dbtest.Failed, testID, w.Code)
 			}
-			t.Logf("\t%s\tTest %d:\tShould receive a status code of 403 for the response.", dbtest.Success, testID)
+			t.Logf("\t%s\tTest %d:\tShould receive a status code of 401 for the response.", dbtest.Success, testID)
 
 			recv := w.Body.String()
-			resp := `{"error":"attempted action is not allowed"}`
+			resp := `{"error":"Unauthorized"}`
 			if resp != recv {
 				t.Log("Got :", recv)
 				t.Log("Want:", resp)
@@ -402,16 +413,22 @@ func (ut *UserTests) crudUser(t *testing.T) {
 	ut.postUser409(t, nu)
 
 	ut.getUser200(t, nu.ID)
-	ut.putUser204(t, nu.ID)
-	ut.putUser403(t, nu.ID)
+	ut.putUser200(t, nu.ID)
+	ut.putUser401(t, nu.ID)
 }
 
 // postUser201 validates a user can be created with the endpoint.
 func (ut *UserTests) postUser201(t *testing.T) user.User {
+	email, err := mail.ParseAddress("bill@ardanlabs.com")
+	if err != nil {
+		t.Fatalf("\t%s\tTest %d:\tShould be able to parse email: %s.", dbtest.Failed, 0, err)
+	}
+	t.Logf("\t%s\tTest %d:\tShould be able to parse email.", dbtest.Success, 0)
+
 	nu := user.NewUser{
-		Name:            "Dmitry Ovchinnikov",
-		Email:           "dmitry.v.ovchinnikov@gmail.com",
-		Roles:           []string{auth.RoleAdmin},
+		Name:            "Bill Kennedy",
+		Email:           *email,
+		Roles:           []user.Role{user.RoleAdmin},
 		Password:        "gophers",
 		PasswordConfirm: "gophers",
 	}
@@ -444,12 +461,18 @@ func (ut *UserTests) postUser201(t *testing.T) user.User {
 				t.Fatalf("\t%s\tTest %d:\tShould be able to unmarshal the response : %v", dbtest.Failed, testID, err)
 			}
 
+			email, err := mail.ParseAddress("bill@ardanlabs.com")
+			if err != nil {
+				t.Fatalf("\t%s\tTest %d:\tShould be able to parse email: %s.", dbtest.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould be able to parse email.", dbtest.Success, testID)
+
 			// Define what we wanted to receive. We will just trust the generated
-			// fields like ID and Dates, so we copy u.
+			// fields like ID and Dates so we copy u.
 			exp := got
-			exp.Name = "Dmitry Ovchinnikov"
-			exp.Email = "dmitry.v.ovchinnikov@gmail.com"
-			exp.Roles = []string{auth.RoleAdmin}
+			exp.Name = "Bill Kennedy"
+			exp.Email = *email
+			exp.Roles = []user.Role{user.RoleAdmin}
 
 			if diff := cmp.Diff(got, exp); diff != "" {
 				t.Fatalf("\t%s\tTest %d:\tShould get the expected result. Diff:\n%s", dbtest.Failed, testID, diff)
@@ -497,8 +520,8 @@ func (ut *UserTests) postUser409(t *testing.T, usr user.User) {
 }
 
 // deleteUser204 validates deleting a user that does exist.
-func (ut *UserTests) deleteUser204(t *testing.T, id string) {
-	r := httptest.NewRequest(http.MethodDelete, "/v1/users/"+id, nil)
+func (ut *UserTests) deleteUser204(t *testing.T, id uuid.UUID) {
+	r := httptest.NewRequest(http.MethodDelete, "/v1/users/"+id.String(), nil)
 	w := httptest.NewRecorder()
 
 	r.Header.Set("Authorization", "Bearer "+ut.adminToken)
@@ -518,8 +541,8 @@ func (ut *UserTests) deleteUser204(t *testing.T, id string) {
 }
 
 // getUser200 validates a user request for an existing userid.
-func (ut *UserTests) getUser200(t *testing.T, id string) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/users/"+id, nil)
+func (ut *UserTests) getUser200(t *testing.T, id uuid.UUID) {
+	r := httptest.NewRequest(http.MethodGet, "/v1/users/"+id.String(), nil)
 	w := httptest.NewRecorder()
 
 	r.Header.Set("Authorization", "Bearer "+ut.adminToken)
@@ -540,13 +563,19 @@ func (ut *UserTests) getUser200(t *testing.T, id string) {
 				t.Fatalf("\t%s\tTest %d:\tShould be able to unmarshal the response : %v", dbtest.Failed, testID, err)
 			}
 
+			email, err := mail.ParseAddress("bill@ardanlabs.com")
+			if err != nil {
+				t.Fatalf("\t%s\tTest %d:\tShould be able to parse email: %s.", dbtest.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould be able to parse email.", dbtest.Success, testID)
+
 			// Define what we wanted to receive. We will just trust the generated
-			// fields like Dates, so we copy p.
+			// fields like Dates so we copy p.
 			exp := got
 			exp.ID = id
-			exp.Name = "Dmitry Ovchinnikov"
-			exp.Email = "dmitry.v.ovchinnikov@gmail.com"
-			exp.Roles = []string{auth.RoleAdmin}
+			exp.Name = "Bill Kennedy"
+			exp.Email = *email
+			exp.Roles = []user.Role{user.RoleAdmin}
 
 			if diff := cmp.Diff(got, exp); diff != "" {
 				t.Fatalf("\t%s\tTest %d:\tShould get the expected result. Diff:\n%s", dbtest.Failed, testID, diff)
@@ -556,11 +585,11 @@ func (ut *UserTests) getUser200(t *testing.T, id string) {
 	}
 }
 
-// putUser204 validates updating a user that does exist.
-func (ut *UserTests) putUser204(t *testing.T, id string) {
-	body := `{"name": "Ovchinnikov Dmitry"}`
+// putUser200 validates updating a user that does exist.
+func (ut *UserTests) putUser200(t *testing.T, id uuid.UUID) {
+	body := `{"name": "Jacob Walker"}`
 
-	r := httptest.NewRequest(http.MethodPut, "/v1/users/"+id, strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPut, "/v1/users/"+id.String(), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	r.Header.Set("Authorization", "Bearer "+ut.adminToken)
@@ -571,12 +600,12 @@ func (ut *UserTests) putUser204(t *testing.T, id string) {
 		testID := 0
 		t.Logf("\tTest %d:\tWhen using the modified user value.", testID)
 		{
-			if w.Code != http.StatusNoContent {
-				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 204 for the response : %v", dbtest.Failed, testID, w.Code)
+			if w.Code != http.StatusOK {
+				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 200 for the response : %v", dbtest.Failed, testID, w.Code)
 			}
-			t.Logf("\t%s\tTest %d:\tShould receive a status code of 204 for the response.", dbtest.Success, testID)
+			t.Logf("\t%s\tTest %d:\tShould receive a status code of 200 for the response.", dbtest.Success, testID)
 
-			r = httptest.NewRequest(http.MethodGet, "/v1/users/"+id, nil)
+			r = httptest.NewRequest(http.MethodGet, "/v1/users/"+id.String(), nil)
 			w = httptest.NewRecorder()
 
 			r.Header.Set("Authorization", "Bearer "+ut.adminToken)
@@ -592,24 +621,30 @@ func (ut *UserTests) putUser204(t *testing.T, id string) {
 				t.Fatalf("\t%s\tTest %d:\tShould be able to unmarshal the response : %v", dbtest.Failed, testID, err)
 			}
 
-			if ru.Name != "Ovchinnikov Dmitry" {
-				t.Fatalf("\t%s\tTest %d:\tShould see an updated Name : got %q want %q", dbtest.Failed, testID, ru.Name, "Ovchinnikov Dmitry")
+			if ru.Name != "Jacob Walker" {
+				t.Fatalf("\t%s\tTest %d:\tShould see an updated Name : got %q want %q", dbtest.Failed, testID, ru.Name, "Jacob Walker")
 			}
 			t.Logf("\t%s\tTest %d:\tShould see an updated Name.", dbtest.Success, testID)
 
-			if ru.Email != "dmitry.v.ovchinnikov@gmail.com" {
-				t.Fatalf("\t%s\tTest %d:\tShould not affect other fields like Email : got %q want %q", dbtest.Failed, testID, ru.Email, "dmitry.v.ovchinnikov@gmail.com")
+			email, err := mail.ParseAddress("bill@ardanlabs.com")
+			if err != nil {
+				t.Fatalf("\t%s\tTest %d:\tShould be able to parse email: %s.", dbtest.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould be able to parse email.", dbtest.Success, testID)
+
+			if ru.Email != *email {
+				t.Fatalf("\t%s\tTest %d:\tShould not affect other fields like Email : got %q want %q", dbtest.Failed, testID, ru.Email, "bill@ardanlabs.com")
 			}
 			t.Logf("\t%s\tTest %d:\tShould not affect other fields like Email.", dbtest.Success, testID)
 		}
 	}
 }
 
-// putUser403 validates that a user can't modify users unless they are an admin.
-func (ut *UserTests) putUser403(t *testing.T, id string) {
-	body := `{"name": "Helen Ovchinnikova"}`
+// putUser401 validates that a user can't modify users unless they are an admin.
+func (ut *UserTests) putUser401(t *testing.T, id uuid.UUID) {
+	body := `{"name": "Anna Walker"}`
 
-	r := httptest.NewRequest(http.MethodPut, "/v1/users/"+id, strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPut, "/v1/users/"+id.String(), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	r.Header.Set("Authorization", "Bearer "+ut.userToken)
@@ -620,10 +655,10 @@ func (ut *UserTests) putUser403(t *testing.T, id string) {
 		testID := 0
 		t.Logf("\tTest %d:\tWhen a non-admin user makes a request", testID)
 		{
-			if w.Code != http.StatusForbidden {
-				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 403 for the response : %v", dbtest.Failed, testID, w.Code)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("\t%s\tTest %d:\tShould receive a status code of 401 for the response : %v", dbtest.Failed, testID, w.Code)
 			}
-			t.Logf("\t%s\tTest %d:\tShould receive a status code of 403 for the response.", dbtest.Success, testID)
+			t.Logf("\t%s\tTest %d:\tShould receive a status code of 401 for the response.", dbtest.Success, testID)
 		}
 	}
 }

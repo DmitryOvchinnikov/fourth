@@ -3,25 +3,26 @@ package commands
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
-	userCore "github.com/dmitryovchinnikov/third/business/core/user"
-	"github.com/dmitryovchinnikov/third/business/sys/auth"
-	"github.com/dmitryovchinnikov/third/business/sys/database"
-	"github.com/dmitryovchinnikov/third/foundation/keystore"
+	"github.com/dmitryovchinnikov/fourth/business/core/user"
+	"github.com/dmitryovchinnikov/fourth/business/core/user/stores/userdb"
+	"github.com/dmitryovchinnikov/fourth/business/sys/database"
+	"github.com/dmitryovchinnikov/fourth/business/web/auth"
+	"github.com/dmitryovchinnikov/fourth/foundation/vault"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 // GenToken generates a JWT for the specified user.
-func GenToken(log *zap.SugaredLogger, cfg database.Config, userID string, kid string) error {
-	if userID == "" || kid == "" {
+func GenToken(log *zap.SugaredLogger, dbConfig database.Config, vaultConfig vault.Config, userID uuid.UUID, kid string) error {
+	if kid == "" {
 		fmt.Println("help: gentoken <user_id> <kid>")
 		return ErrHelp
 	}
 
-	db, err := database.Open(cfg)
+	db, err := database.Open(dbConfig)
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}
@@ -30,24 +31,25 @@ func GenToken(log *zap.SugaredLogger, cfg database.Config, userID string, kid st
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	user := userCore.NewCore(log, db)
+	core := user.NewCore(userdb.NewStore(log, db))
 
-	usr, err := user.QueryByID(ctx, userID)
+	usr, err := core.QueryByID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("retrieve user: %w", err)
 	}
 
-	// Construct a key store based on the key files stored in
-	// the specified directory.
-	keysFolder := "zarf/keys/"
-	ks, err := keystore.NewFS(os.DirFS(keysFolder))
+	vault, err := vault.New(vaultConfig)
 	if err != nil {
-		return fmt.Errorf("reading keys: %w", err)
+		return fmt.Errorf("new keystore: %w", err)
 	}
 
-	// Init the auth package.
-	activeKID := "54bb2165-71e1-41a6-af3e-7da4a0e1e2c1"
-	a, err := auth.New(activeKID, ks)
+	authCfg := auth.Config{
+		Log:       log,
+		DB:        db,
+		KeyLookup: vault,
+	}
+
+	a, err := auth.New(authCfg)
 	if err != nil {
 		return fmt.Errorf("constructing auth: %w", err)
 	}
@@ -65,8 +67,8 @@ func GenToken(log *zap.SugaredLogger, cfg database.Config, userID string, kid st
 	// jti (JWT ID): Unique identifier; can be used to prevent the JWT from being replayed (allows a token to be used only once)
 	claims := auth.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   usr.ID,
-			Issuer:    "service project",
+			Subject:   usr.ID.String(),
+			Issuer:    "fourth project",
 			ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(8760 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
 		},
@@ -77,7 +79,7 @@ func GenToken(log *zap.SugaredLogger, cfg database.Config, userID string, kid st
 	// with need to be configured with the information found in the public key
 	// file to validate these claims. Dgraph does not support key rotate at
 	// this time.
-	token, err := a.GenerateToken(claims)
+	token, err := a.GenerateToken(kid, claims)
 	if err != nil {
 		return fmt.Errorf("generating token: %w", err)
 	}

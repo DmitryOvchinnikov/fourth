@@ -4,38 +4,26 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/dmitryovchinnikov/third/business/sys/validate"
-	"github.com/dmitryovchinnikov/third/foundation/web"
+	"github.com/dmitryovchinnikov/fourth/business/sys/validate"
+	"github.com/dmitryovchinnikov/fourth/business/web/auth"
+	v1Web "github.com/dmitryovchinnikov/fourth/business/web/v1"
+	"github.com/dmitryovchinnikov/fourth/foundation/web"
 	"go.uber.org/zap"
-
-	v1Web "github.com/dmitryovchinnikov/third/business/web/v1"
 )
 
 // Errors handles errors coming out of the call chain. It detects normal
 // application errors which are used to respond to the client in a uniform way.
 // Unexpected errors (status >= 500) are logged.
 func Errors(log *zap.SugaredLogger) web.Middleware {
-
-	// This is the actual middleware function to be executed.
 	m := func(handler web.Handler) web.Handler {
-
-		// Create the handler that will be attached in the middleware chain.
 		h := func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-
-			// If the context is missing this value, request the service
-			// to be shutdown gracefully.
-			v, err := web.GetValues(ctx)
-			if err != nil {
-				return web.NewShutdownError("web value missing from context")
-			}
-
-			// Run the next handler and catch any propagated error.
 			if err := handler(ctx, w, r); err != nil {
+				log.Errorw("ERROR", "trace_id", web.GetTraceID(ctx), "message", err)
 
-				// Log the error.
-				log.Errorw("ERROR", "traceid", v.TraceID, "message", err)
+				ctx, span := web.AddSpan(ctx, "business.web.v1.mid.error")
+				span.RecordError(err)
+				span.End()
 
-				// Build out the error response.
 				var er v1Web.ErrorResponse
 				var status int
 				switch {
@@ -54,6 +42,12 @@ func Errors(log *zap.SugaredLogger) web.Middleware {
 					}
 					status = reqErr.Status
 
+				case auth.IsAuthError(err):
+					er = v1Web.ErrorResponse{
+						Error: http.StatusText(http.StatusUnauthorized),
+					}
+					status = http.StatusUnauthorized
+
 				default:
 					er = v1Web.ErrorResponse{
 						Error: http.StatusText(http.StatusInternalServerError),
@@ -61,19 +55,17 @@ func Errors(log *zap.SugaredLogger) web.Middleware {
 					status = http.StatusInternalServerError
 				}
 
-				// Respond with the error back to the client.
 				if err := web.Respond(ctx, w, er, status); err != nil {
 					return err
 				}
 
 				// If we receive the shutdown err we need to return it
 				// back to the base handler to shut down the service.
-				if ok := web.IsShutdown(err); ok {
+				if web.IsShutdown(err) {
 					return err
 				}
 			}
 
-			// The error has been handled so we can stop propagating it.
 			return nil
 		}
 

@@ -6,30 +6,34 @@ ARG BUILD_REF
 # Create the service directory and the copy the module files first and then
 # download the dependencies. If this doesn't change, we won't need to do this
 # again in future builds.
-#RUN mkdir /third
-#COPY go.* /third/
-#WORKDIR /third
-#RUN go mod download
+# RUN mkdir /fourth
+# COPY go.* /fourth/
+# WORKDIR /fourth
+# RUN go mod download
 
 # Copy the source code into the container.
-COPY . /third
+COPY . /fourth
 
 # Build the admin binary.
-WORKDIR /third/app/tooling/sales-admin
+WORKDIR /fourth/app/tooling/sales-admin
 RUN go build -ldflags "-X main.build=${BUILD_REF}"
 
 # Build the service binary.
-WORKDIR /third/app/services/sales-api
+WORKDIR /fourth/app/services/sales-api
 RUN go build -ldflags "-X main.build=${BUILD_REF}"
 
+
 # Run the Go Binary in Alpine.
-FROM alpine:3.15
+FROM alpine:3.17
 ARG BUILD_DATE
 ARG BUILD_REF
-COPY --from=build_sales-api --chown=sales:sales /third/zarf/keys/. /third/zarf/keys/.
-COPY --from=build_sales-api --chown=sales:sales /third/app/tooling/sales-admin/sales-admin /third/sales-admin
-COPY --from=build_sales-api --chown=sales:sales /third/app/services/sales-api/sales-api /third/sales-api
-WORKDIR /third
+RUN addgroup -g 1000 -S sales && \
+    adduser -u 1000 -h /fourth -G sales -S sales
+COPY --from=build_sales-api --chown=sales:sales /fourth/zarf/keys/. /fourth/zarf/keys/.
+COPY --from=build_sales-api --chown=sales:sales /fourth/app/tooling/sales-admin/sales-admin /fourth/sales-admin
+COPY --from=build_sales-api --chown=sales:sales /fourth/app/services/sales-api/sales-api /fourth/sales-api
+WORKDIR /fourth
+USER sales
 CMD ["./sales-api"]
 
 LABEL org.opencontainers.image.created="${BUILD_DATE}" \

@@ -1,18 +1,23 @@
-# Binaries for programs and plugins
+# Compiled Object files, Static and Dynamic libs (Shared Objects)
 *.exe
 *.exe~
 *.dll
-*.so
 *.dylib
+*.o
+*.a
+*.so
 
 # Mac
 .DC_Store
 
+# Backup files
+*~*
+
 # Binaries
 app/services/sales-api/sales-api
 app/services/metrics/metrics
-app/tooling/logfmt/logfmt
 app/tooling/sales-admin/sales-admin
+app/tooling/sales-admin/logfmt
 
 # Test binary, built with `go test -c`
 *.test
@@ -23,8 +28,11 @@ app/tooling/sales-admin/sales-admin
 # Dependency directories (remove the comment below to include it)
 vendor/
 
-.idea
+# Editor files
+.idea/
 .idea/*
+*.iml
+*.swp
 
 ./*.pem
 

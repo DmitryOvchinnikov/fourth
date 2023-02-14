@@ -3,28 +3,32 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
-	"reflect"
 	"strings"
 	"time"
 
-	"github.com/dmitryovchinnikov/third/foundation/web"
+	"github.com/dmitryovchinnikov/fourth/foundation/web"
 	"github.com/jmoiron/sqlx"
-	"github.com/lib/pq"
-	_ "github.com/lib/pq" // Calls init function.
+	"github.com/lib/pq" // Calls init function.
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 )
 
 // lib/pq errorCodeNames
 // https://github.com/lib/pq/blob/master/error.go#L178
-const uniqueViolation = "23505"
+const (
+	uniqueViolation = "23505"
+	undefinedTable  = "42P01"
+)
 
 // Set of error variables for CRUD operations.
 var (
-	ErrDBNotFound        = errors.New("not found")
+	ErrDBNotFound        = sql.ErrNoRows
 	ErrDBDuplicatedEntry = errors.New("duplicated entry")
+	ErrUndefinedTable    = errors.New("undefined table")
 )
 
 // Config is the required properties to use the database.
@@ -33,6 +37,7 @@ type Config struct {
 	Password     string
 	Host         string
 	Name         string
+	Schema       string
 	MaxIdleConns int
 	MaxOpenConns int
 	DisableTLS   bool
@@ -48,6 +53,9 @@ func Open(cfg Config) (*sqlx.DB, error) {
 	q := make(url.Values)
 	q.Set("sslmode", sslMode)
 	q.Set("timezone", "utc")
+	if cfg.Schema != "" {
+		q.Set("search_path", cfg.Schema)
+	}
 
 	u := url.URL{
 		Scheme:   "postgres",
@@ -70,8 +78,12 @@ func Open(cfg Config) (*sqlx.DB, error) {
 // StatusCheck returns nil if it can successfully talk to the database. It
 // returns a non-nil error otherwise.
 func StatusCheck(ctx context.Context, db *sqlx.DB) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Second)
+		defer cancel()
+	}
 
-	// First check we can ping the database.
 	var pingError error
 	for attempts := 1; ; attempts++ {
 		pingError = db.Ping()
@@ -84,83 +96,82 @@ func StatusCheck(ctx context.Context, db *sqlx.DB) error {
 		}
 	}
 
-	// Make sure we didn't timeout or be cancelled.
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	// Run a simple query to determine connectivity. Running this query forces a
-	// round trip through the database.
+	// Run a simple query to determine connectivity.
+	// Running this query forces a round trip through the database.
 	const q = `SELECT true`
 	var tmp bool
 	return db.QueryRowContext(ctx, q).Scan(&tmp)
 }
 
-// Transactor interface needed to begin transaction.
-type Transactor interface {
-	Beginx() (*sqlx.Tx, error)
-}
-
 // WithinTran runs passed function and do commit/rollback at the end.
-func WithinTran(ctx context.Context, log *zap.SugaredLogger, db Transactor, fn func(sqlx.ExtContext) error) error {
+func WithinTran(ctx context.Context, log *zap.SugaredLogger, db *sqlx.DB, fn func(*sqlx.Tx) error) error {
 	traceID := web.GetTraceID(ctx)
 
-	// Begin the transaction.
-	log.Infow("begin tran", "traceid", traceID)
+	log.Infow("begin tran")
 	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("begin tran: %w", err)
 	}
 
-	// Mark to the defer function a rollback is required.
-	mustRollback := true
-
-	// Setup a defer function for rolling back the transaction. If
-	// mustRollback is true it means the call to fn failed, and we
-	// need to rollback the transaction.
+	// We can defer the rollback since the code checks if the transaction
+	// has already been committed.
 	defer func() {
-		if mustRollback {
-			log.Infow("rollback tran", "traceid", traceID)
-			if err := tx.Rollback(); err != nil {
-				log.Errorw("unable to rollback tran", "traceid", traceID, "ERROR", err)
+		if err := tx.Rollback(); err != nil {
+			if errors.Is(err, sql.ErrTxDone) {
+				return
 			}
+			log.Errorw("unable to rollback tran", "trace_id", traceID, "ERROR", err)
 		}
+		log.Infow("rollback tran", "trace_id", traceID)
 	}()
 
-	// Execute the code inside the transaction. If the function
-	// fails, return the error and the defer function will rollback.
 	if err := fn(tx); err != nil {
-
-		// Checks if the error is of code 23505 (unique_violation).
 		if pqerr, ok := err.(*pq.Error); ok && pqerr.Code == uniqueViolation {
 			return ErrDBDuplicatedEntry
 		}
 		return fmt.Errorf("exec tran: %w", err)
 	}
 
-	// Disarm the deferred rollback.
-	mustRollback = false
-
-	// Commit the transaction.
-	log.Infow("commit tran", "traceid", traceID)
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tran: %w", err)
 	}
+	log.Infow("commit tran", "trace_id", traceID)
 
 	return nil
 }
 
-// NamedExecContext is a helper function to execute a CUD operation with
+// ExecContext is a helper function to execute a CUD operation with
 // logging and tracing.
-func NamedExecContext(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data interface{}) error {
+func ExecContext(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string) error {
+	return NamedExecContext(ctx, log, db, query, struct{}{})
+}
+
+// NamedExecContext is a helper function to execute a CUD operation with
+// logging and tracing where field replacement is necessary.
+func NamedExecContext(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any) error {
 	q := queryString(query, data)
-	log.Infow("database.NamedExecContext", "traceid", web.GetTraceID(ctx), "query", q)
+
+	if _, ok := data.(struct{}); ok {
+		log.WithOptions(zap.AddCallerSkip(3)).Infow("database.NamedExecContext", "trace_id", web.GetTraceID(ctx), "query", q)
+	} else {
+		log.WithOptions(zap.AddCallerSkip(2)).Infow("database.NamedExecContext", "trace_id", web.GetTraceID(ctx), "query", q)
+	}
+
+	ctx, span := web.AddSpan(ctx, "business.sys.database.exec", attribute.String("query", q))
+	defer span.End()
 
 	if _, err := sqlx.NamedExecContext(ctx, db, query, data); err != nil {
-
-		// Checks if the error is of code 23505 (unique_violation).
-		if pqerr, ok := err.(*pq.Error); ok && pqerr.Code == uniqueViolation {
-			return ErrDBDuplicatedEntry
+		if pqerr, ok := err.(*pq.Error); ok {
+			switch pqerr.Code {
+			case undefinedTable:
+				return ErrUndefinedTable
+			case uniqueViolation:
+				return ErrDBDuplicatedEntry
+			}
 		}
 		return err
 	}
@@ -168,43 +179,142 @@ func NamedExecContext(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtCo
 	return nil
 }
 
-// NamedQuerySlice is a helper function for executing queries that return a
+// QuerySlice is a helper function for executing queries that return a
 // collection of data to be unmarshalled into a slice.
-func NamedQuerySlice(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data interface{}, dest interface{}) error {
-	q := queryString(query, data)
-	log.Infow("database.NamedQuerySlice", "traceid", web.GetTraceID(ctx), "query", q)
+func QuerySlice[T any](ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, dest *[]T) error {
+	return namedQuerySlice(ctx, log, db, query, struct{}{}, dest, false)
+}
 
-	val := reflect.ValueOf(dest)
-	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Slice {
-		return errors.New("must provide a pointer to a slice")
+// NamedQuerySlice is a helper function for executing queries that return a
+// collection of data to be unmarshalled into a slice where field replacement is
+// necessary.
+func NamedQuerySlice[T any](ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any, dest *[]T) error {
+	return namedQuerySlice(ctx, log, db, query, data, dest, false)
+}
+
+// NamedQuerySliceUsingIn is a helper function for executing queries that return
+// a collection of data to be unmarshalled into a slice where field replacement
+// is necessary. Use this if the query has an IN clause.
+func NamedQuerySliceUsingIn[T any](ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any, dest *[]T) error {
+	return namedQuerySlice(ctx, log, db, query, data, dest, true)
+}
+
+func namedQuerySlice[T any](ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any, dest *[]T, withIn bool) error {
+	q := queryString(query, data)
+
+	if _, ok := data.(struct{}); ok {
+		log.WithOptions(zap.AddCallerSkip(3)).Infow("database.NamedQuerySlice", "trace_id", web.GetTraceID(ctx), "query", q)
+	} else {
+		log.WithOptions(zap.AddCallerSkip(2)).Infow("database.NamedQuerySlice", "trace_id", web.GetTraceID(ctx), "query", q)
 	}
 
-	rows, err := sqlx.NamedQueryContext(ctx, db, query, data)
+	ctx, span := web.AddSpan(ctx, "business.sys.database.queryslice", attribute.String("query", q))
+	defer span.End()
+
+	var rows *sqlx.Rows
+	var err error
+
+	switch withIn {
+	case true:
+		rows, err = func() (*sqlx.Rows, error) {
+			named, args, err := sqlx.Named(query, data)
+			if err != nil {
+				return nil, err
+			}
+
+			query, args, err := sqlx.In(named, args...)
+			if err != nil {
+				return nil, err
+			}
+
+			query = db.Rebind(query)
+			return db.QueryxContext(ctx, query, args...)
+		}()
+
+	default:
+		rows, err = sqlx.NamedQueryContext(ctx, db, query, data)
+	}
+
 	if err != nil {
+		if pqerr, ok := err.(*pq.Error); ok && pqerr.Code == undefinedTable {
+			return ErrUndefinedTable
+		}
 		return err
 	}
 	defer rows.Close()
 
-	slice := val.Elem()
+	var slice []T
 	for rows.Next() {
-		v := reflect.New(slice.Type().Elem())
-		if err := rows.StructScan(v.Interface()); err != nil {
+		v := new(T)
+		if err := rows.StructScan(v); err != nil {
 			return err
 		}
-		slice.Set(reflect.Append(slice, v.Elem()))
+		slice = append(slice, *v)
 	}
+	*dest = slice
 
 	return nil
 }
 
-// NamedQueryStruct is a helper function for executing queries that return a
-// single value to be unmarshalled into a struct type.
-func NamedQueryStruct(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data interface{}, dest interface{}) error {
-	q := queryString(query, data)
-	log.Infow("database.NamedQueryStruct", "traceid", web.GetTraceID(ctx), "query", q)
+// QueryStruct is a helper function for executing queries that return a
+// single value to be unmarshalled into a struct type where field replacement is necessary.
+func QueryStruct(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, dest any) error {
+	return namedQueryStruct(ctx, log, db, query, struct{}{}, dest, false)
+}
 
-	rows, err := sqlx.NamedQueryContext(ctx, db, query, data)
+// NamedQueryStruct is a helper function for executing queries that return a
+// single value to be unmarshalled into a struct type where field replacement is necessary.
+func NamedQueryStruct(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any, dest any) error {
+	return namedQueryStruct(ctx, log, db, query, data, dest, false)
+}
+
+// NamedQueryStructUsingIn is a helper function for executing queries that return
+// a single value to be unmarshalled into a struct type where field replacement
+// is necessary. Use this if the query has an IN clause.
+func NamedQueryStructUsingIn(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any, dest any) error {
+	return namedQueryStruct(ctx, log, db, query, data, dest, true)
+}
+
+func namedQueryStruct(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtContext, query string, data any, dest any, withIn bool) error {
+	q := queryString(query, data)
+
+	if _, ok := data.(struct{}); ok {
+		log.WithOptions(zap.AddCallerSkip(3)).Infow("database.NamedQueryStruct", "trace_id", web.GetTraceID(ctx), "query", q)
+	} else {
+		log.WithOptions(zap.AddCallerSkip(2)).Infow("database.NamedQueryStruct", "trace_id", web.GetTraceID(ctx), "query", q)
+	}
+
+	ctx, span := web.AddSpan(ctx, "business.sys.database.query", attribute.String("query", q))
+	defer span.End()
+
+	var rows *sqlx.Rows
+	var err error
+
+	switch withIn {
+	case true:
+		rows, err = func() (*sqlx.Rows, error) {
+			named, args, err := sqlx.Named(query, data)
+			if err != nil {
+				return nil, err
+			}
+
+			query, args, err := sqlx.In(named, args...)
+			if err != nil {
+				return nil, err
+			}
+
+			query = db.Rebind(query)
+			return db.QueryxContext(ctx, query, args...)
+		}()
+
+	default:
+		rows, err = sqlx.NamedQueryContext(ctx, db, query, data)
+	}
+
 	if err != nil {
+		if pqerr, ok := err.(*pq.Error); ok && pqerr.Code == undefinedTable {
+			return ErrUndefinedTable
+		}
 		return err
 	}
 	defer rows.Close()
@@ -221,7 +331,7 @@ func NamedQueryStruct(ctx context.Context, log *zap.SugaredLogger, db sqlx.ExtCo
 }
 
 // queryString provides a pretty print version of the query and parameters.
-func queryString(query string, args ...interface{}) string {
+func queryString(query string, args any) string {
 	query, params, err := sqlx.Named(query, args)
 	if err != nil {
 		return err.Error()

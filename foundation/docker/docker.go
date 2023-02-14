@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"testing"
+	"strings"
 )
 
 // Container tracks information about the docker container started for tests.
@@ -41,10 +41,6 @@ func StartContainer(image string, port string, args ...string) (*Container, erro
 		Host: net.JoinHostPort(hostIP, hostPort),
 	}
 
-	fmt.Printf("Image:       %s\n", image)
-	fmt.Printf("ContainerID: %s\n", c.ID)
-	fmt.Printf("Host:        %s\n", c.Host)
-
 	return &c, nil
 }
 
@@ -53,27 +49,25 @@ func StopContainer(id string) error {
 	if err := exec.Command("docker", "stop", id).Run(); err != nil {
 		return fmt.Errorf("could not stop container: %w", err)
 	}
-	fmt.Println("Stopped:", id)
 
 	if err := exec.Command("docker", "rm", id, "-v").Run(); err != nil {
 		return fmt.Errorf("could not remove container: %w", err)
 	}
-	fmt.Println("Removed:", id)
 
 	return nil
 }
 
 // DumpContainerLogs outputs logs from the running docker container.
-func DumpContainerLogs(t *testing.T, id string) {
+func DumpContainerLogs(id string) []byte {
 	out, err := exec.Command("docker", "logs", id).CombinedOutput()
 	if err != nil {
-		t.Fatalf("could not log container: %v", err)
+		return nil
 	}
-	t.Logf("Logs for %s\n%s:", id, out)
+	return out
 }
 
 func extractIPPort(id string, port string) (hostIP string, hostPort string, err error) {
-	tmpl := fmt.Sprintf("{{range $k,$v := (index .NetworkSettings.Ports \"%s/tcp\")}}{{json $v}}{{end}}", port)
+	tmpl := fmt.Sprintf("[{{range $k,$v := (index .NetworkSettings.Ports \"%s/tcp\")}}{{json $v}}{{end}}]", port)
 
 	cmd := exec.Command("docker", "inspect", "-f", tmpl, id)
 	var out bytes.Buffer
@@ -82,13 +76,24 @@ func extractIPPort(id string, port string) (hostIP string, hostPort string, err 
 		return "", "", fmt.Errorf("could not inspect container %s: %w", id, err)
 	}
 
-	var doc struct {
+	// When IPv6 is turned on with Docker.
+	// Got  [{"HostIp":"0.0.0.0","HostPort":"49190"}{"HostIp":"::","HostPort":"49190"}]
+	// Need [{"HostIp":"0.0.0.0","HostPort":"49190"},{"HostIp":"::","HostPort":"49190"}]
+	data := strings.ReplaceAll(out.String(), "}{", "},{")
+
+	var docs []struct {
 		HostIP   string
 		HostPort string
 	}
-	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+	if err := json.Unmarshal([]byte(data), &docs); err != nil {
 		return "", "", fmt.Errorf("could not decode json: %w", err)
 	}
 
-	return doc.HostIP, doc.HostPort, nil
+	for _, doc := range docs {
+		if doc.HostIP != "::" {
+			return doc.HostIP, doc.HostPort, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("could not locate ip/port")
 }

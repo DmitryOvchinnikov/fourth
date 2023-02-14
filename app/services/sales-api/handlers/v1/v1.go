@@ -5,14 +5,17 @@ package v1
 import (
 	"net/http"
 
-	v1TestGrp "github.com/dmitryovchinnikov/third/app/services/sales-api/handlers/v1/testgrp"
-	v1usergrp "github.com/dmitryovchinnikov/third/app/services/sales-api/handlers/v1/usergrp"
-	userCore "github.com/dmitryovchinnikov/third/business/core/user"
-	"github.com/dmitryovchinnikov/third/business/sys/auth"
-	"github.com/dmitryovchinnikov/third/business/web/v1/mid"
-	"github.com/dmitryovchinnikov/third/foundation/web"
+	"github.com/dmitryovchinnikov/fourth/app/services/sales-api/handlers/v1/productgrp"
+	"github.com/dmitryovchinnikov/fourth/app/services/sales-api/handlers/v1/usergrp"
+	"github.com/dmitryovchinnikov/fourth/business/core/product"
+	"github.com/dmitryovchinnikov/fourth/business/core/product/stores/productdb"
+	"github.com/dmitryovchinnikov/fourth/business/core/user"
+	"github.com/dmitryovchinnikov/fourth/business/core/user/stores/usercache"
+	"github.com/dmitryovchinnikov/fourth/business/core/user/stores/userdb"
+	"github.com/dmitryovchinnikov/fourth/business/web/auth"
+	"github.com/dmitryovchinnikov/fourth/business/web/v1/mid"
+	"github.com/dmitryovchinnikov/fourth/foundation/web"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq" // calls init function.
 	"go.uber.org/zap"
 )
 
@@ -27,35 +30,28 @@ type Config struct {
 func Routes(app *web.App, cfg Config) {
 	const version = "v1"
 
-	tgh := v1TestGrp.Handlers{
-		Log: cfg.Log,
-	}
-
-	app.Handle(http.MethodGet, version, "/test", tgh.Test)
-	app.Handle(http.MethodGet, version, "/testauth", tgh.Test, mid.Authenticate(cfg.Auth), mid.Authorize("ADMIN"))
-
 	authen := mid.Authenticate(cfg.Auth)
-	admin := mid.Authorize(auth.RoleAdmin)
+	ruleAdmin := mid.Authorize(cfg.Auth, auth.RuleAdminOnly)
+	ruleAdminOrSubject := mid.Authorize(cfg.Auth, auth.RuleAdminOrSubject)
 
-	// Register user management and authentication endpoints.
-	ugh := v1usergrp.Handlers{
-		User: userCore.NewCore(cfg.Log, cfg.DB),
+	ugh := usergrp.Handlers{
+		User: user.NewCore(usercache.NewStore(cfg.Log, userdb.NewStore(cfg.Log, cfg.DB))),
 		Auth: cfg.Auth,
 	}
-	app.Handle(http.MethodGet, version, "/users/token", ugh.Token)
-	app.Handle(http.MethodGet, version, "/users/:page/:rows", ugh.Query, authen, admin)
-	app.Handle(http.MethodGet, version, "/users/:id", ugh.QueryByID, authen)
-	app.Handle(http.MethodPost, version, "/users", ugh.Create, authen, admin)
-	app.Handle(http.MethodPut, version, "/users/:id", ugh.Update, authen, admin)
-	app.Handle(http.MethodDelete, version, "/users/:id", ugh.Delete, authen, admin)
+	app.Handle(http.MethodGet, version, "/users/token/:kid", ugh.Token)
+	app.Handle(http.MethodGet, version, "/users/:page/:rows", ugh.Query, authen, ruleAdmin)
+	app.Handle(http.MethodGet, version, "/users/:userid", ugh.QueryByID, authen, ruleAdminOrSubject)
+	app.Handle(http.MethodPost, version, "/users", ugh.Create, authen, ruleAdmin)
+	app.Handle(http.MethodPut, version, "/users/:userid", ugh.Update, authen, ruleAdminOrSubject)
+	app.Handle(http.MethodDelete, version, "/users/:userid", ugh.Delete, authen, ruleAdminOrSubject)
 
-	//// Register product and sale endpoints.
-	//pgh := productgrp.Handlers{
-	//	Product: product.NewCore(cfg.Log, cfg.DB),
-	//}
-	//app.Handle(http.MethodGet, version, "/products/:page/:rows", pgh.Query, authen)
-	//app.Handle(http.MethodGet, version, "/products/:id", pgh.QueryByID, authen)
-	//app.Handle(http.MethodPost, version, "/products", pgh.Create, authen)
-	//app.Handle(http.MethodPut, version, "/products/:id", pgh.Update, authen)
-	//app.Handle(http.MethodDelete, version, "/products/:id", pgh.Delete, authen)
+	pgh := productgrp.Handlers{
+		Product: product.NewCore(productdb.NewStore(cfg.Log, cfg.DB)),
+		Auth:    cfg.Auth,
+	}
+	app.Handle(http.MethodGet, version, "/products/:page/:rows", pgh.Query, authen)
+	app.Handle(http.MethodGet, version, "/products/:id", pgh.QueryByID, authen)
+	app.Handle(http.MethodPost, version, "/products", pgh.Create, authen)
+	app.Handle(http.MethodPut, version, "/products/:id", pgh.Update, authen)
+	app.Handle(http.MethodDelete, version, "/products/:id", pgh.Delete, authen)
 }

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"expvar"
+	"expvar" // Calls init function.
 	"fmt"
 	"net/http"
 	"os"
@@ -12,36 +12,31 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dmitryovchinnikov/third/app/services/sales-api/handlers"
-	"github.com/dmitryovchinnikov/third/business/sys/auth"
-	"github.com/dmitryovchinnikov/third/business/sys/database"
-	"github.com/dmitryovchinnikov/third/foundation/keystore"
-	"github.com/dmitryovchinnikov/third/foundation/logger"
+	"github.com/ardanlabs/conf/v3"
+	"github.com/dmitryovchinnikov/fourth/app/services/sales-api/handlers"
+	"github.com/dmitryovchinnikov/fourth/business/sys/database"
+	"github.com/dmitryovchinnikov/fourth/business/web/auth"
+	"github.com/dmitryovchinnikov/fourth/business/web/v1/debug"
+	"github.com/dmitryovchinnikov/fourth/foundation/logger"
+	"github.com/dmitryovchinnikov/fourth/foundation/vault"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/sdk/trace"
-	"go.uber.org/automaxprocs/maxprocs"
-	"go.uber.org/zap"
-
-	"github.com/ardanlabs/conf/v3"
-
 	"go.opentelemetry.io/otel/exporters/zipkin"
 	"go.opentelemetry.io/otel/sdk/resource"
-
+	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"go.uber.org/automaxprocs/maxprocs"
+	"go.uber.org/zap"
 )
 
 /*
-	todo: Need to figure out timeouts for http service.
+	Need to figure out timeouts for http service.
+	Look at pgx for database access and query execution.
 */
 
-// build is the git version of this program.
-// It is set using build flags in the makefile.
 var build = "develop"
 
 func main() {
-
-	// Construct the application logger.
 	log, err := logger.New("SALES-API")
 	if err != nil {
 		fmt.Println(err)
@@ -49,7 +44,6 @@ func main() {
 	}
 	defer log.Sync()
 
-	// Perform the startup and shutdown sequence.
 	if err := run(log); err != nil {
 		log.Errorw("startup", "ERROR", err)
 		log.Sync()
@@ -63,11 +57,7 @@ func run(log *zap.SugaredLogger) error {
 		GOMAXPROCS
 	*/
 
-	// Want to see what maxprocs reports.
 	opt := maxprocs.Logger(log.Infof)
-
-	// Set the correct number of threads for the service
-	// based on what is available either by the machine or quotas.
 	if _, err := maxprocs.Set(opt); err != nil {
 		return fmt.Errorf("maxprocs: %w", err)
 	}
@@ -83,25 +73,31 @@ func run(log *zap.SugaredLogger) error {
 			ReadTimeout     time.Duration `conf:"default:5s"`
 			WriteTimeout    time.Duration `conf:"default:10s"`
 			IdleTimeout     time.Duration `conf:"default:120s"`
-			ShutdownTimeout time.Duration `conf:"default:20s,noprint"` // noprint or mask: no print in console
+			ShutdownTimeout time.Duration `conf:"default:20s"`
 			APIHost         string        `conf:"default:0.0.0.0:3000"`
 			DebugHost       string        `conf:"default:0.0.0.0:4000"`
 		}
 		Auth struct {
-			KeysFolder string `conf:"default:zarf/keys/"`
-			ActiveKID  string `conf:"default:54bb2165-71e1-41a6-af3e-7da4a0e1e2c1"`
+			// KeysFolder string `conf:"default:zarf/keys/"`
+			// ActiveKID  string `conf:"default:54bb2165-71e1-41a6-af3e-7da4a0e1e2c1"`
+			Issuer string `conf:"default:fourth project"`
+		}
+		Vault struct {
+			Address   string `conf:"default:http://vault-service.sales-system.svc.cluster.local:8200"`
+			MountPath string `conf:"default:secret"`
+			Token     string `conf:"default:mytoken,mask"`
 		}
 		DB struct {
 			User         string `conf:"default:postgres"`
 			Password     string `conf:"default:postgres,mask"`
-			Host         string `conf:"default:localhost"`
+			Host         string `conf:"default:database-service.sales-system.svc.cluster.local"`
 			Name         string `conf:"default:postgres"`
-			MaxIdleConns int    `conf:"default:0"`
+			MaxIdleConns int    `conf:"default:2"`
 			MaxOpenConns int    `conf:"default:0"`
 			DisableTLS   bool   `conf:"default:true"`
 		}
 		Zipkin struct {
-			ReporterURI string  `conf:"default:http://localhost:9411/api/v2/spans"`
+			ReporterURI string  `conf:"default:http://zipkin-service.sales-system.svc.cluster.local:9411/api/v2/spans"`
 			ServiceName string  `conf:"default:sales-api"`
 			Probability float64 `conf:"default:0.05"`
 		}
@@ -138,28 +134,9 @@ func run(log *zap.SugaredLogger) error {
 	expvar.NewString("build").Set(build)
 
 	/*
-		Initialize authentication support
-	*/
-
-	log.Infow("startup", "status", "initializing authentication support")
-
-	// Construct a key store based on the key files stored in
-	// the specified directory.
-	ks, err := keystore.NewFS(os.DirFS(cfg.Auth.KeysFolder))
-	if err != nil {
-		return fmt.Errorf("reading keys: %w", err)
-	}
-
-	aut, err := auth.New(cfg.Auth.ActiveKID, ks)
-	if err != nil {
-		return fmt.Errorf("constructing auth: %w", err)
-	}
-
-	/*
 		Database Support
 	*/
 
-	// Create connectivity to the database.
 	log.Infow("startup", "status", "initializing database support", "host", cfg.DB.Host)
 
 	db, err := database.Open(database.Config{
@@ -180,6 +157,38 @@ func run(log *zap.SugaredLogger) error {
 	}()
 
 	/*
+		Initialize authentication support
+	*/
+
+	log.Infow("startup", "status", "initializing authentication support")
+
+	// Simple keystore versus using Vault.
+	// ks, err := keystore.NewFS(os.DirFS(cfg.Auth.KeysFolder))
+	// if err != nil {
+	// 	return fmt.Errorf("reading keys: %w", err)
+	// }
+
+	vault, err := vault.New(vault.Config{
+		Address:   cfg.Vault.Address,
+		Token:     cfg.Vault.Token,
+		MountPath: cfg.Vault.MountPath,
+	})
+	if err != nil {
+		return fmt.Errorf("constructing vault: %w", err)
+	}
+
+	authCfg := auth.Config{
+		Log:       log,
+		DB:        db,
+		KeyLookup: vault,
+	}
+
+	auth, err := auth.New(authCfg)
+	if err != nil {
+		return fmt.Errorf("constructing auth: %w", err)
+	}
+
+	/*
 		Start Tracing Support
 	*/
 
@@ -195,23 +204,16 @@ func run(log *zap.SugaredLogger) error {
 	}
 	defer traceProvider.Shutdown(context.Background())
 
+	tracer := traceProvider.Tracer("service")
+
 	/*
 		Start Debug Service
 	*/
 
 	log.Infow("startup", "status", "debug v1 router started", "host", cfg.Web.DebugHost)
 
-	// The Debug function returns a mux to listen and serve on for all the debug
-	// related endpoints. This includes the standard library endpoints.
-
-	// Construct the mux for the debug calls.
-	//debugMux := handlers.DebugStandardLibraryMux()
-	debugMux := handlers.DebugMux(build, log, db)
-
-	// Start the service listening for debug requests.
-	// Not concerned with shutting this down with load shedding.
 	go func() {
-		if err := http.ListenAndServe(cfg.Web.DebugHost, debugMux); err != nil {
+		if err := http.ListenAndServe(cfg.Web.DebugHost, debug.Mux(build, log, db)); err != nil {
 			log.Errorw("shutdown", "status", "debug v1 router closed", "host", cfg.Web.DebugHost, "ERROR", err)
 		}
 	}()
@@ -222,20 +224,17 @@ func run(log *zap.SugaredLogger) error {
 
 	log.Infow("startup", "status", "initializing V1 API support")
 
-	// Make a channel to listen for an interrupt or terminate signal from the OS.
-	// Use a buffered channel because the signal package requires it.
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
-	// Construct the mux for the API calls.
 	apiMux := handlers.APIMux(handlers.APIMuxConfig{
 		Shutdown: shutdown,
 		Log:      log,
-		Auth:     aut,
+		Auth:     auth,
 		DB:       db,
+		Tracer:   tracer,
 	})
 
-	// Construct a server to service the requests against the mux.
 	api := http.Server{
 		Addr:         cfg.Web.APIHost,
 		Handler:      apiMux,
@@ -245,11 +244,8 @@ func run(log *zap.SugaredLogger) error {
 		ErrorLog:     zap.NewStdLog(log.Desugar()),
 	}
 
-	// Make a channel to listen for errors coming from the listener. Use a
-	// buffered channel so the goroutine can exit if we don't collect this error.
 	serverErrors := make(chan error, 1)
 
-	// Start the service listening for api requests.
 	go func() {
 		log.Infow("startup", "status", "api router started", "host", api.Addr)
 		serverErrors <- api.ListenAndServe()
@@ -259,7 +255,6 @@ func run(log *zap.SugaredLogger) error {
 		Shutdown
 	*/
 
-	// Blocking main and waiting for shutdown.
 	select {
 	case err := <-serverErrors:
 		return fmt.Errorf("server error: %w", err)
@@ -268,11 +263,9 @@ func run(log *zap.SugaredLogger) error {
 		log.Infow("shutdown", "status", "shutdown started", "signal", sig)
 		defer log.Infow("shutdown", "status", "shutdown complete", "signal", sig)
 
-		// Give outstanding requests a deadline for completion.
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Web.ShutdownTimeout)
 		defer cancel()
 
-		// Asking listener to shut down and shed load.
 		if err := api.Shutdown(ctx); err != nil {
 			api.Close()
 			return fmt.Errorf("could not stop server gracefully: %w", err)
@@ -317,7 +310,10 @@ func startTracing(serviceName string, reporterURI string, probability float64) (
 		),
 	)
 
-	// I can only get this working properly using the singleton :(
+	// We must set this provider as the global provider for things to work,
+	// but we pass this provider around the program where needed to collect
+	// our traces.
 	otel.SetTracerProvider(traceProvider)
+
 	return traceProvider, nil
 }

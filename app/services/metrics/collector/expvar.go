@@ -20,14 +20,12 @@ type Expvar struct {
 
 // New creates a Expvar for collection metrics.
 func New(host string) (*Expvar, error) {
-	dl := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-		DualStack: true,
-	}
 	tr := http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dl.DialContext,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		MaxIdleConns:          2,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -47,7 +45,7 @@ func New(host string) (*Expvar, error) {
 }
 
 // Collect captures metrics on the host configure to this endpoint.
-func (exp *Expvar) Collect() (map[string]interface{}, error) {
+func (exp *Expvar) Collect() (map[string]any, error) {
 	req, err := http.NewRequest("GET", exp.host, nil)
 	if err != nil {
 		return nil, err
@@ -67,7 +65,7 @@ func (exp *Expvar) Collect() (map[string]interface{}, error) {
 		return nil, errors.New(string(msg))
 	}
 
-	data := make(map[string]interface{})
+	data := make(map[string]any)
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}

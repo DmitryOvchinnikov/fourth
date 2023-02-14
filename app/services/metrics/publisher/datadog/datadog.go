@@ -23,14 +23,12 @@ type Datadog struct {
 
 // New initializes Datadog access for publishing metrics.
 func New(log *log.Logger, apiKey string, host string) *Datadog {
-	dl := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-		DualStack: true,
-	}
 	tr := http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dl.DialContext,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		MaxIdleConns:          2,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -53,7 +51,7 @@ func New(log *log.Logger, apiKey string, host string) *Datadog {
 
 // Publish handles the processing of metrics for deliver
 // to the DataDog.
-func (d *Datadog) Publish(data map[string]interface{}) {
+func (d *Datadog) Publish(data map[string]any) {
 	doc, err := marshalDatadog(d.log, data)
 	if err != nil {
 		d.log.Println("datadog.publish :", err)
@@ -69,7 +67,7 @@ func (d *Datadog) Publish(data map[string]interface{}) {
 }
 
 // marshalDatadog converts the data map to datadog JSON document.
-func marshalDatadog(log *log.Logger, data map[string]interface{}) ([]byte, error) {
+func marshalDatadog(log *log.Logger, data map[string]any) ([]byte, error) {
 	/*
 		{ "series" : [
 				{
@@ -104,11 +102,11 @@ func marshalDatadog(log *log.Logger, data map[string]interface{}) ([]byte, error
 
 	// Define the Datadog data format.
 	type series struct {
-		Metric string          `json:"metric"`
-		Points [][]interface{} `json:"points"`
-		Type   string          `json:"type"`
-		Host   string          `json:"host"`
-		Tags   []string        `json:"tags"`
+		Metric string   `json:"metric"`
+		Points [][]any  `json:"points"`
+		Type   string   `json:"type"`
+		Host   string   `json:"host"`
+		Tags   []string `json:"tags"`
 	}
 
 	// Populate the data into the data structure.
@@ -120,7 +118,7 @@ func marshalDatadog(log *log.Logger, data map[string]interface{}) ([]byte, error
 		case int, float64:
 			doc.Series = append(doc.Series, series{
 				Metric: env + "." + key,
-				Points: [][]interface{}{{"$currenttime", value}},
+				Points: [][]any{{"$currenttime", value}},
 				Type:   mType,
 				Host:   host,
 				Tags:   []string{envTag},
